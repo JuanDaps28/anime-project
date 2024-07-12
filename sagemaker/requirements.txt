@@ -1,0 +1,10 @@
+gensim
+matplotlib
+nltk
+numpy
+pandas
+pyLDAvis
+psycopg2
+seaborn
+surprise
+wordcloud

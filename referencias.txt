@@ -1,0 +1,11 @@
+https://medium.com/@jcjerez_77135/sistemas-de-recomendaci%C3%B3n-uso-de-la-librer%C3%ADa-surprise-de-python-bd3b6b72a3bb
+https://medium.com/@martinezvicenteantonio/librer%C3%ADa-surprise-en-python-creando-sistemas-de-recomendaci%C3%B3n-fbc363e8543b
+https://github.com/python-spain/PyConES-2019-data/blob/master/files/sistemas-de-recomendacion-con-surprise/pycones-surprise-algorithms.ipynb
+https://surprise.readthedocs.io/en/stable/knn_inspired.html#surprise.prediction_algorithms.knns.KNNWithMeans
+https://github.com/NicolasHug/Surprise/blob/c4cc2e3f4f1ed061f26b26c7f1f56fd337a3e70c/doc/source/prediction_algorithms.rst
+https://medium.com/@mariomg85/leveraging-surprise-library-for-recommender-systems-in-python-915e699f7a99
+https://anderfernandez.com/blog/sistema-de-recomendacion-con-python/
+https://www.kaggle.com/code/chitwanmanchanda/recommender-system-using-surprise-library
+https://community.fabric.microsoft.com/t5/Desktop/The-remote-certificate-is-invalid-according-to-the-validation/m-p/531475
+https://www.questionpro.com/es/calculadora-de-muestra.html
+https://towardsdatascience.com/end-to-end-topic-modeling-in-python-latent-dirichlet-allocation-lda-35ce4ed6b3e0
