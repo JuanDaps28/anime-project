@@ -1,9 +1,9 @@
 {
     "postgresql": {
-        "database": "########",
-        "user": "########",
-        "password": "########",
-        "host": "000.000.000.000",
-        "port": 0000
+        "database": "anime-db",
+        "user": "postgres",
+        "password": "PostgreSQL28#",
+        "host": "52.204.59.215",
+        "port": 5432
     }
 }

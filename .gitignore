@@ -1,0 +1,3 @@
+sagemaker/settings.json
+lambda/animeCatalogETL/settings.json
+lambda/animeRatingsETL/settings.json
