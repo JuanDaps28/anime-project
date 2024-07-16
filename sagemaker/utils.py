@@ -11,17 +11,67 @@ from wordcloud import WordCloud
 nltk.download("stopwords")
 import pickle
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import psycopg2
 import pyLDAvis
 import pyLDAvis.gensim
 import seaborn as sns
+from matplotlib import pyplot as plt
 from nltk.corpus import stopwords
+from sklearn.cluster import KMeans
+from sklearn.model_selection import cross_validate as sklearn_cross_validate
 from surprise import SVD, Dataset, KNNWithMeans, Reader, accuracy
-from surprise.model_selection import (GridSearchCV, cross_validate,
-                                      train_test_split)
+from surprise.model_selection import GridSearchCV
+from surprise.model_selection import cross_validate as surprise_cross_validate
+from surprise.model_selection import train_test_split
+
+
+class PostgreSQLClient:
+    def __init__(
+        self,
+        database,
+        user,
+        password,
+        host="localhost",
+        port=5432,
+    ) -> None:
+        self.database = database
+        self.user = user
+        self.password = password
+        self.host = host
+        self.port = port
+
+    def execute_query(self, query: str) -> None:
+        conn = psycopg2.connect(
+            database=self.database,
+            user=self.user,
+            password=self.password,
+            host=self.host,
+            port=self.port,
+        )
+        cursor = conn.cursor()
+        print(f"Executing query {query}")
+        cursor.execute(query)
+        conn.commit()
+        conn.close()
+
+    def query_to_df(self, query: str) -> pd.DataFrame:
+        conn = psycopg2.connect(
+            database=self.database,
+            user=self.user,
+            password=self.password,
+            host=self.host,
+            port=self.port,
+        )
+        cursor = conn.cursor()
+        print(f"Executing query {query}")
+        cursor.execute(query)
+        result = cursor.fetchall()
+        column_names = [desc[0] for desc in cursor.description]
+        conn.commit()
+        conn.close()
+        return pd.DataFrame(result, columns=column_names)
 
 
 class DataDescriptor:
@@ -204,66 +254,171 @@ class LDA:
             LDA_prepared, f"./results/lda_{self.texts_col}_{self.num_topics}.html"
         )
 
-    def add_data_topics(self) -> pd.DataFrame:
-        self.data["topics_distr"] = self.data[self.texts_col].apply(
-            lambda x: self.__lda_model[self.__id2word.doc2bow(x.lower().split())]
-        )
+    def predict_topics(self) -> pd.DataFrame:
+        self.topics_predictions = self.data
+        self.topics_predictions["topics_distr"] = self.topics_predictions[
+            self.texts_col
+        ].apply(lambda x: self.__lda_model[self.__id2word.doc2bow(x.lower().split())])
 
         items_list = []
-        for item in self.data.to_dict("records"):
+        for item in self.topics_predictions.to_dict("records"):
             for topic_distr in item["topics_distr"]:
-                item[f"topic_{topic_distr[0]+1}"] = topic_distr[1]
+                item[f"{self.texts_col}_topic_{topic_distr[0]+1}"] = topic_distr[1]
             items_list.append(item)
 
-        self.data = pd.DataFrame(items_list).drop(columns=["topics_distr"]).fillna(0)
-        return self.data
+        self.topics_predictions = (
+            pd.DataFrame(items_list).drop(columns=["topics_distr"]).fillna(0)
+        )
+        return self.topics_predictions
+
+    def upload_topics(self) -> None:
+        create_table_query = f"""
+            DROP TABLE IF EXISTS animes_catalog_{self.texts_col}_topics;
+
+            CREATE TABLE animes_catalog_{self.texts_col}_topics (
+                {self.texts_col}_topics_id INT GENERATED ALWAYS AS IDENTITY,
+                anime_id INT NOT NULL,
+
+                primary key({self.texts_col}_topics_id),
+                foreign key(anime_id)
+                references animes_catalog(anime_id)
+            );
+        """
+        self.__postgres.execute_query(create_table_query)
+
+        for t in range(self.num_topics):
+            add_column_query = f"""
+                ALTER TABLE animes_catalog_{self.texts_col}_topics
+                ADD {self.texts_col}_topic_{t+1} DECIMAL(16, 4) NOT NULL;
+            """
+            self.__postgres.execute_query(add_column_query)
+
+        anime_catalog_topics_insert_data = ", ".join(
+            [
+                f"""({record["anime_id"]}, {", ".join([str(record[f"{self.texts_col}_topic_{t + 1}"]) for t in range(self.num_topics)])})"""
+                for record in self.topics_predictions.to_dict("records")
+            ]
+        )
+        if anime_catalog_topics_insert_data:
+            self.__postgres.execute_query(
+                query=f"""
+                    INSERT INTO animes_catalog_{self.texts_col}_topics (anime_id, {", ".join([f"{self.texts_col}_topic_{t + 1}" for t in range(self.num_topics)])})
+                    VALUES {anime_catalog_topics_insert_data};
+                """
+            )
 
 
-class PostgreSQLClient:
-    def __init__(
-        self,
-        database,
-        user,
-        password,
-        host="localhost",
-        port=5432,
+class Clustering:
+    def __init__(self, data_query: str, features_replace_values: dict = None) -> None:
+        with open("settings.json") as f:
+            settings = json.load(f)
+        postgres_settings = settings["postgresql"]
+        self.__postgres = PostgreSQLClient(
+            database=postgres_settings["database"],
+            user=postgres_settings["user"],
+            password=postgres_settings["password"],
+            host=postgres_settings["host"],
+            port=postgres_settings["port"],
+        )
+        self.data = self.__postgres.query_to_df(data_query)
+        self.replace_values = features_replace_values
+
+    def get_elbow_plot(
+        self, k_options: list, model_features_list: list = None, cv: int = 3
     ) -> None:
-        self.database = database
-        self.user = user
-        self.password = password
-        self.host = host
-        self.port = port
+        df = self.data
+        if model_features_list is not None:
+            df = df[model_features_list]
 
-    def execute_query(self, query: str) -> None:
-        conn = psycopg2.connect(
-            database=self.database,
-            user=self.user,
-            password=self.password,
-            host=self.host,
-            port=self.port,
-        )
-        cursor = conn.cursor()
-        print(f"Executing query {query}")
-        cursor.execute(query)
-        conn.commit()
-        conn.close()
+        if self.replace_values is not None:
+            for col in self.replace_values.keys():
+                df[col] = df[col].replace(self.replace_values[col])
 
-    def query_to_df(self, query: str) -> pd.DataFrame:
-        conn = psycopg2.connect(
-            database=self.database,
-            user=self.user,
-            password=self.password,
-            host=self.host,
-            port=self.port,
+        self.__data_array = np.array(df)
+
+        kmeans = [
+            KMeans(init="random", random_state=0, n_clusters=k) for k in k_options
+        ]
+        results = [
+            sklearn_cross_validate(kmeans[k], self.__data_array, cv=cv)
+            for k in range(len(k_options))
+        ]
+        scores = [np.mean(results[k]["test_score"]) * -1 for k in range(len(k_options))]
+        plt.plot(k_options, scores)
+        plt.xlabel("Param k")
+        plt.ylabel("Score")
+        plt.title("Score by K")
+        plt.show()
+
+    def train_model(self, k: int) -> None:
+        self.__clustering_model = KMeans(init="random", random_state=0, n_clusters=k)
+        self.__clustering_model.fit(self.__data_array)
+
+    def predict_clusters(self):
+        self.clustering_predictions = self.__clustering_model.predict(self.__data_array)
+        self.clustering_predictions = pd.DataFrame(self.clustering_predictions).rename(
+            columns={0: "cluster"}
         )
-        cursor = conn.cursor()
-        print(f"Executing query {query}")
-        cursor.execute(query)
-        result = cursor.fetchall()
-        column_names = [desc[0] for desc in cursor.description]
-        conn.commit()
-        conn.close()
-        return pd.DataFrame(result, columns=column_names)
+        self.clustering_predictions["cluster"] = (
+            self.clustering_predictions["cluster"] + 1
+        )
+        self.clustering_predictions = pd.merge(
+            self.data, self.clustering_predictions, left_index=True, right_index=True
+        )
+        return self.clustering_predictions
+
+    def __get_clusters_distr(self) -> None:
+        if "user_id" in self.clustering_predictions.columns:
+            data = self.clustering_predictions[["cluster", "user_id"]]
+        elif "anime_id" in self.clustering_predictions.columns:
+            data = self.clustering_predictions[["cluster", "anime_id"]]
+        (
+            data.groupby(["cluster"]).count() / len(self.clustering_predictions)
+        ).plot.bar()
+        plt.show()
+
+    def __get_qualitative_vars_distr_by_cluster(
+        self, qualitative_var: str, charts_by_row
+    ):
+        data = self.clustering_predictions
+        plt.figure(figsize=(15, 15))
+        clusters_amount = len(data["cluster"].unique())
+        row_num = math.ceil(clusters_amount / charts_by_row)
+        for k in range(1, clusters_amount + 1):
+            data_temp_k = data[data["cluster"] == k]
+            plt.subplot(row_num, charts_by_row, k)
+            bars = plt.bar(
+                data_temp_k[qualitative_var].unique(),
+                data_temp_k[qualitative_var].value_counts() / len(data_temp_k),
+            )
+            plt.ylabel("Pct of total")
+            plt.xlabel(qualitative_var)
+            plt.title(f"Distribution by {qualitative_var} values - cluster {k}")
+        plt.show()
+
+    def __get_quantitative_var_boxplot_by_cluster(self, quantitative_var: str):
+        data = self.clustering_predictions[["cluster", quantitative_var]]
+        ax = sns.boxplot(x="cluster", y=quantitative_var, data=data)
+        plt.title(f"{quantitative_var} boxplots by cluster")
+        plt.ylabel(f"{quantitative_var} values")
+        plt.xlabel("cluster")
+        plt.show()
+
+    def get_cluster_graphics(
+        self,
+        qualitative_vars: list[str] = None,
+        quantitative_vars: list[str] = None,
+        charts_by_row: int = 2,
+    ) -> None:
+        self.__get_clusters_distr()
+        if qualitative_vars is not None:
+            for var in qualitative_vars:
+                self.__get_qualitative_vars_distr_by_cluster(
+                    qualitative_var=var, charts_by_row=charts_by_row
+                )
+        if quantitative_vars is not None:
+            for var in quantitative_vars:
+                self.__get_quantitative_var_boxplot_by_cluster(quantitative_var=var)
 
 
 class RecommendationSystem:
@@ -322,7 +477,7 @@ class RecommendationSystem:
             algorythm = SVD(**model_params)
         elif model.lower() == "knn":
             algorythm = KNNWithMeans(**model_params)
-        algo_results = cross_validate(
+        algo_results = surprise_cross_validate(
             algo=algorythm,
             data=self.__rating_dataset,
             measures=["rmse"],
@@ -371,10 +526,10 @@ class RecommendationSystem:
                         "rating": round(prediction.est, 2),
                     }
                 )
-        predictions = pd.DataFrame(predictions)
-        predictions = (
-            predictions.sort_values(by=["rating"], ascending=False)
+        self.recommendations_predictions = pd.DataFrame(predictions)
+        self.recommendations_predictions = (
+            self.recommendations_predictions.sort_values(by=["rating"], ascending=False)
             .head(num_recos)
             .reset_index(drop=True)
         )
-        return predictions
+        return self.recommendations_predictions
