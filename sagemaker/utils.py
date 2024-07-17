@@ -442,8 +442,13 @@ class RecommendationSystem:
             port=postgres_settings["port"],
         )
         self.rating_data = self.__postgres.query_to_df(rating_data_query)
+        self.__user_id_col = user_id_col
+        self.__item_id_col = item_id_col
+        self.__rating_col = rating_col
         self.__rating_dataset = Dataset.load_from_df(
-            self.rating_data[[user_id_col, item_id_col, rating_col]],
+            self.rating_data[
+                [self.__user_id_col, self.__item_id_col, self.__rating_col]
+            ],
             Reader(rating_scale=(min_rating, max_rating)),
         )
 
@@ -500,23 +505,22 @@ class RecommendationSystem:
         predictions = self.__algorythm.test(testset)
         print(accuracy.rmse(predictions))
 
-    def predict_recommendations(
+    def __get_user_base_predictions(
         self,
-        items_query: str,
+        unseen_items: pd.DataFrame,
         items_id_col: str,
         items_name_col: str,
         user_id: int,
         num_recos: int = 10,
-        threshold: int = 6,
+        rating_threshold: int = 6,
     ) -> pd.DataFrame:
         predictions = []
-        items = self.__postgres.query_to_df(query=items_query)
-        items = items.to_dict("records")
-        for item in items:
+        unseen_items = unseen_items.to_dict("records")
+        for item in unseen_items:
             prediction = self.__algorythm.predict(uid=user_id, iid=item[items_id_col])
             if (
                 prediction.details["was_impossible"] == False
-                and prediction.est >= threshold
+                and prediction.est >= rating_threshold
             ):
                 predictions.append(
                     {
@@ -526,10 +530,77 @@ class RecommendationSystem:
                         "rating": round(prediction.est, 2),
                     }
                 )
-        self.recommendations_predictions = pd.DataFrame(predictions)
-        self.recommendations_predictions = (
-            self.recommendations_predictions.sort_values(by=["rating"], ascending=False)
+        predictions = pd.DataFrame(predictions)
+        predictions = (
+            predictions.sort_values(by=["rating"], ascending=False)
             .head(num_recos)
             .reset_index(drop=True)
         )
-        return self.recommendations_predictions
+        return predictions
+
+    def __get_item_base_predictions(
+        self,
+        user_id: int,
+        rating_threshold: int,
+        num_recos: int,
+        unseen_items: pd.DataFrame,
+        clusters_df: pd.DataFrame,
+    ):
+        rating_data = self.rating_data.copy()
+        rating_data.set_index(self.__item_id_col, inplace=True)
+        clusters_df.set_index(self.__item_id_col, inplace=True)
+        unseen_items.set_index(self.__item_id_col, inplace=True)
+
+        rating_data = rating_data[
+            (rating_data[self.__user_id_col] == user_id)
+            & (rating_data[self.__rating_col] >= rating_threshold)
+        ]
+        if not rating_data.empty:
+            rating_data = rating_data.sort_values(
+                by=[self.__rating_col], ascending=False
+            ).head(10)
+            rating_data = rating_data.join(clusters_df, how="inner")
+            random_item = rating_data.sample(1).to_dict("records")
+            cluster_random_item = random_item[0]["cluster"]
+
+            unseen_items = unseen_items.join(clusters_df, how="inner").reset_index()
+            unseen_items = unseen_items[unseen_items["cluster"] == cluster_random_item]
+            unseen_items["user_id"] = user_id
+            recommendations = unseen_items[
+                ["user_id", "anime_id", "anime_name"]
+            ].sample(num_recos).reset_index(drop=True)
+        else:
+            recommendations = pd.DataFrame(
+                [], columns=["user_id", "anime_id", "anime_name"]
+            )
+
+        return recommendations
+
+    def predict_recommendations(
+        self,
+        unseen_items_query: str,
+        items_id_col: str,
+        items_name_col: str,
+        user_id: int,
+        clusters_df: pd.DataFrame,
+        num_recos: int = 10,
+        rating_threshold: int = 6,
+    ) -> pd.DataFrame:
+        unseen_items = self.__postgres.query_to_df(query=unseen_items_query)
+        self.predictions_user_based = self.__get_user_base_predictions(
+            unseen_items=unseen_items,
+            items_id_col=items_id_col,
+            items_name_col=items_name_col,
+            user_id=user_id,
+            num_recos=num_recos,
+            rating_threshold=rating_threshold,
+        )
+        self.predictions_item_based = self.__get_item_base_predictions(
+            user_id=user_id,
+            rating_threshold=rating_threshold,
+            num_recos=num_recos,
+            unseen_items=unseen_items,
+            clusters_df=clusters_df,
+        )
+
+        return self.predictions_user_based, self.predictions_item_based
